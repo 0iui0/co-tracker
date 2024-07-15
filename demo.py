@@ -69,7 +69,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # load the input video frame by frame
-    video = read_video_from_path(args.video_path)
+    video, filenames = read_video_from_path(args.video_path)
     video = torch.from_numpy(video).permute(0, 3, 1, 2)[None].float()
     segm_mask = np.array(Image.open(os.path.join(args.mask_path)))
     segm_mask = torch.from_numpy(segm_mask)[None, None]
@@ -99,9 +99,10 @@ if __name__ == "__main__":
 
     # save a video with predicted tracks
     seq_name = os.path.splitext(args.video_path.split("/")[-1])[0]
-    vis = Visualizer(save_dir="./saved_videos", pad_value=120, linewidth=3)
+    vis = Visualizer(save_dir="./saved_videos", pad_value=0, linewidth=3)
     vis.visualize(
         video,
+        filenames,
         pred_tracks,
         pred_visibility,
         query_frame=0 if args.backward_tracking else args.grid_query_frame,

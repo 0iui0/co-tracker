@@ -16,10 +16,13 @@ from PIL import Image, ImageDraw
 
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
+from matplotlib.backend_bases import MouseButton
+from typing import List
+import json
 
 # Event handler for mouse clicks
 def on_click(event, queries):
-    if event.button == 1 and event.inaxes == ax:  # Left mouse button clicked
+    if event.button == MouseButton.MIDDLE and event.inaxes == ax:  # MIDDLE mouse button clicked
         x, y = int(np.round(event.xdata)), int(np.round(event.ydata))
         frame_idx = 0  # Assuming the first frame for simplicity
 
@@ -75,25 +78,31 @@ def read_video_from_path(path):
         if os.path.isfile(path):
             reader = imageio.get_reader(path)
             frames = []
+            frame_ids = []
             for i, im in enumerate(reader):
                 frames.append(np.array(im))
-            return np.stack(frames)
+                frame_ids.append(str(i))
+            return np.stack(frames), frame_ids
         # Check if the path is a directory
         elif os.path.isdir(path):
             images = []
+            filenames = []
             # Get all files in the directory and sort them
-            filenames = sorted(os.listdir(path))
-            for filename in filenames:
+            file_list = sorted(os.listdir(path))
+            for filename in file_list:
                 if filename.endswith(('.png', '.jpg', '.jpeg')):
                     img = imageio.imread(os.path.join(path, filename))
                     images.append(img)
-            return np.stack(images)
+                    # Remove the file extension
+                    base_name = os.path.splitext(filename)[0]
+                    filenames.append(base_name)
+            return np.stack(images), filenames
         else:
             print("Error: Invalid path")
-            return None
+            return None, None
     except Exception as e:
         print("Error opening video file or images folder: ", e)
-        return None
+        return None, None
 
 def draw_circle(rgb, coord, radius, color=(255, 0, 0), visible=True):
     # Create a draw object
@@ -124,6 +133,18 @@ def add_weighted(rgb, alpha, original, beta, gamma):
     return (rgb * alpha + original * beta + gamma).astype("uint8")
 
 
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
+
+
 class Visualizer:
     def __init__(
         self,
@@ -148,10 +169,20 @@ class Visualizer:
         self.pad_value = pad_value
         self.linewidth = linewidth
         self.fps = fps
+        self.custom_data = dict(
+            version= "2.3.5",
+            flags={},
+            shapes=[],
+            imagePath="",
+            imageData=None,
+            imageHeight=-1,
+            imageWidth=-1,
+        )
 
     def visualize(
         self,
         video: torch.Tensor,  # (B,T,C,H,W)
+        filenames: List[str],  # (B,)
         tracks: torch.Tensor,  # (B,T,N,2)
         visibility: torch.Tensor = None,  # (B, T, N, 1) bool
         gt_tracks: torch.Tensor = None,  # (B,T,N,2)
@@ -184,6 +215,7 @@ class Visualizer:
 
         res_video = self.draw_tracks_on_video(
             video=video,
+            filenames=filenames,
             tracks=tracks,
             visibility=visibility,
             segm_mask=segm_mask,
@@ -225,6 +257,7 @@ class Visualizer:
     def draw_tracks_on_video(
         self,
         video: torch.Tensor,
+        filenames: List[str],
         tracks: torch.Tensor,
         visibility: torch.Tensor = None,
         segm_mask: torch.Tensor = None,
@@ -338,6 +371,55 @@ class Visualizer:
                             visible=visibile,
                         )
             res_video[t] = np.array(img)
+
+        # Save tracks and visibility to text files
+        if visibility is not None:
+            visibility = visibility[0].cpu().numpy()  # Move to CPU and then convert to numpy
+            for t in range(T):
+                track_data = tracks[t]  # Corrected here
+                vis_data = visibility[t]
+                # Combine tracks and visibility
+                combined_data = np.hstack((track_data, vis_data[:, None]))
+                # Save to file
+                # filename = "./saved_videos/" + os.path.splitext(filenames[t])[0] + ".txt"
+                # np.savetxt(filename, combined_data, fmt=['%d', '%d', '%d'])
+                
+                self.custom_data = dict(
+                    version= "2.3.5",
+                    flags={},
+                    shapes=[],
+                    imagePath="",
+                    imageData=None,
+                    imageHeight=-1,
+                    imageWidth=-1,
+                )
+
+                # Save to JSON
+                img_h, img_w = res_video[t].shape[:2]  # Use the first frame's dimensions
+                for i in range(N):
+                    x, y = track_data[i, 0], track_data[i, 1]
+                    # Check if x and y are within the image bounds
+                    if 0 <= x < img_w and 0 <= y < img_h:
+                        shape = {
+                            "label": str(i),
+                            "shape_type": "point",
+                            "flags": {},
+                            "points": [[x, y]],
+                            "group_id": 1,
+                            "description": None,
+                            "difficult": False,
+                            "attributes": {},
+                        }
+                        self.custom_data["shapes"].append(shape)
+                    else:
+                        print(f"Warning: Point ({x}, {y}) is outside the image bounds. Ignoring.")
+                self.custom_data["imagePath"] = os.path.splitext(filenames[t])[0] + ".jpg"
+                self.custom_data["imageHeight"] = img_h
+                self.custom_data["imageWidth"] = img_w
+                output_file = "/datasets/" + os.path.splitext(filenames[t])[0] + ".json"
+                with open(output_file, "w", encoding="utf-8") as f:
+                    json.dump(self.custom_data, f, indent=2, ensure_ascii=False, cls=NumpyEncoder)
+
 
         #  construct the final rgb sequence
         if self.show_first_frame > 0:
